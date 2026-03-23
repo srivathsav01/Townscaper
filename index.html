@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Townscaper</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; }
+
+      #palette {
+        position: fixed;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        background: rgba(0,0,0,0.3);
+        padding: 10px 16px;
+        border-radius: 50px;
+      }
+
+      .swatch {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        cursor: pointer;
+        border: 3px solid transparent;
+        transition: transform 0.15s, border-color 0.15s;
+      }
+
+      .swatch:hover { transform: scale(1.15); }
+      .swatch.active { border-color: white; transform: scale(1.2); }
+    </style>
+  </head>
+  <body>
+    <div id="palette"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
