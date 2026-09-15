@@ -1076,7 +1076,9 @@ function createStarterHome() {
   const v0 = nearestVertex(0, 0);
   addVoxel(v0, 0);
   addVoxel(v0, 1, PALETTE[3]);
-  for (const u of grid.nbrs[v0]) addVoxel(u, 0);
+  // Fill every corner of the cells around the house so the yard forms a
+  // connected ring the dog can walk around.
+  for (const [qi] of grid.vertQuads[v0]) for (const u of grid.quads[qi]) addVoxel(u, 0);
   const vx = camera.position.x, vz = camera.position.z;
   const facing = w => (px[w] - px[v0]) * vx + (pz[w] - pz[v0]) * vz;
   const u = grid.nbrs[v0].reduce((best, w) => (facing(w) > facing(best) ? w : best));
@@ -1105,30 +1107,59 @@ let dog = null;
 
 function makeDog() {
   const group = new THREE.Group();
-  const body = part(boxGeo(0.1, 0.09, 0.19), DOG.fur, 0, 0.12, 0);
-  const chest = part(boxGeo(0.07, 0.05, 0.01), DOG.light, 0, 0.12, 0.096);
+  // Everything above the legs pivots at the hips so the dog can sit and lie down.
+  const torso = new THREE.Group();
+  torso.position.set(0, 0.08, -0.07);
+  const body = part(boxGeo(0.1, 0.09, 0.19), DOG.fur, 0, 0.04, 0.07);
+  const chest = part(boxGeo(0.07, 0.05, 0.01), DOG.light, 0, 0.04, 0.166);
   const head = new THREE.Group();
-  head.position.set(0, 0.2, 0.1);
+  head.position.set(0, 0.12, 0.17);
+  const eyes = [-0.025, 0.025].map(x => part(boxGeo(0.015, 0.015, 0.01), DOG.black, x, 0.02, 0.046));
   head.add(
     part(boxGeo(0.1, 0.09, 0.09), DOG.fur, 0, 0, 0),
     part(boxGeo(0.055, 0.045, 0.06), DOG.light, 0, -0.015, 0.065),
     part(boxGeo(0.022, 0.018, 0.015), DOG.black, 0, -0.005, 0.1),
-    part(boxGeo(0.015, 0.015, 0.01), DOG.black, -0.025, 0.02, 0.046),
-    part(boxGeo(0.015, 0.015, 0.01), DOG.black, 0.025, 0.02, 0.046),
+    ...eyes,
     part(boxGeo(0.02, 0.065, 0.035), DOG.dark, -0.058, -0.005, -0.005),
     part(boxGeo(0.02, 0.065, 0.035), DOG.dark, 0.058, -0.005, -0.005),
   );
   const tail = new THREE.Group();
-  tail.position.set(0, 0.15, -0.095);
+  tail.position.set(0, 0.07, -0.025);
   const tailMesh = part(boxGeo(0.02, 0.02, 0.08), DOG.fur, 0, 0.02, -0.035);
   tailMesh.rotation.x = -0.6;
   tail.add(tailMesh);
-  group.add(body, chest, head, tail);
-  for (const [x, z] of [[-0.03, 0.065], [0.03, 0.065], [-0.03, -0.065], [0.03, -0.065]]) {
-    group.add(part(boxGeo(0.03, 0.08, 0.03), DOG.fur, x, 0.04, z));
-  }
+  torso.add(body, chest, head, tail);
+  // Legs hang from hip pivots so they can swing when walking and tuck when lying down.
+  const legs = [[-0.03, 0.065], [0.03, 0.065], [-0.03, -0.065], [0.03, -0.065]].map(([x, z]) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(x, 0.08, z);
+    pivot.add(part(boxGeo(0.03, 0.08, 0.03), DOG.fur, 0, -0.04, 0));
+    return pivot;
+  });
+  group.add(torso, ...legs);
   group.scale.setScalar(1.4);
-  return { group, body, head, tail, state: 'idle', cell: -1, tween: null };
+  return {
+    group, torso, body, head, eyes, tail, legs,
+    state: 'stand', until: 0, cell: -1, path: [], next: null,
+    walkPhase: 0, zzzAt: 0, tween: null, pose: { ...DOG_POSES.stand },
+  };
+}
+
+const DOG_SPEED = 0.55; // world units per second
+const DOG_POSES = {
+  stand: { torso: 0, legs: 1, head: 0, eyes: 1 },
+  sit: { torso: -0.55, legs: 1, head: 0.45, eyes: 1 },
+  sleep: { torso: 0, legs: 0.3, head: 0.3, eyes: 0.15 },
+};
+
+// The dog can be on open ground: a quay block with nothing built on it.
+const walkable = u => filled(u, 0) && !filled(u, 1);
+const lerpAngle = (a, b, k) => a + ((((b - a + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI) * k;
+
+// A random spot near the middle of a cell.
+function spot(cell, jitter) {
+  const a = Math.random() * Math.PI * 2, r = Math.random() * jitter;
+  return { cell, x: px[cell] + Math.cos(a) * r, z: pz[cell] + Math.sin(a) * r };
 }
 
 function placeDog() {
@@ -1137,24 +1168,133 @@ function placeDog() {
   const p = doorstep(dog.cell);
   dog.group.position.copy(p);
   dog.group.rotation.y = Math.atan2(px[dog.cell] - p.x, pz[dog.cell] - p.z);
+  // Starts sitting on the doorstep for a moment before exploring.
+  dog.state = 'sit';
+  dog.until = 4;
+  dog.pose = { ...DOG_POSES.sit };
   scene.add(dog.group);
 }
 
-// Hop to another yard cell when its spot gets built on.
-function moveDog(u) {
+// Pick a reachable open-ground cell a few steps away and walk there cell by cell.
+function startWalk(d) {
+  const parent = new Map([[d.cell, -1]]);
+  const depth = new Map([[d.cell, 0]]);
+  const queue = [d.cell];
+  for (let i = 0; i < queue.length; i++) {
+    const c = queue[i];
+    if (depth.get(c) >= 5) continue;
+    for (const u of grid.nbrs[c]) {
+      if (parent.has(u) || !walkable(u)) continue;
+      parent.set(u, c);
+      depth.set(u, depth.get(c) + 1);
+      queue.push(u);
+    }
+  }
+  if (queue.length < 2) return false;
+  let c = queue[1 + Math.floor(Math.random() * (queue.length - 1))];
+  const cells = [];
+  while (c !== d.cell) { cells.unshift(c); c = parent.get(c); }
+  d.path = cells.map((cell, i) => spot(cell, i === cells.length - 1 ? 0.22 : 0.08));
+  d.next = d.path.shift();
+  d.state = 'walk';
+  return true;
+}
+
+function chooseDogActivity(d, t) {
+  const r = Math.random();
+  if (r < 0.45 && startWalk(d)) return;
+  if (r < 0.65) { d.state = 'sit'; d.until = t + 3 + Math.random() * 4; }
+  else if (r < 0.82) { d.state = 'sleep'; d.until = t + 8 + Math.random() * 8; }
+  else { d.state = 'stand'; d.until = t + 2 + Math.random() * 3; }
+}
+
+// Little "Z"s that float up from a sleeping dog.
+const zzzMat = new THREE.MeshBasicNodeMaterial({ color: 0xffffff });
+const zzzBar = boxGeo(0.05, 0.012, 0.012), zzzDiag = boxGeo(0.07, 0.012, 0.012);
+const zzzs = [];
+function spawnZ(at) {
+  const z = new THREE.Group();
+  const diag = new THREE.Mesh(zzzDiag, zzzMat);
+  diag.rotation.z = Math.PI / 4;
+  z.add(part(zzzBar, zzzMat, 0, 0.025, 0), diag, part(zzzBar, zzzMat, 0, -0.025, 0));
+  z.position.copy(at);
+  scene.add(z);
+  zzzs.push({ mesh: z, age: 0, drift: (Math.random() - 0.5) * 0.15 });
+}
+
+function updateZzz(dt) {
+  for (let i = zzzs.length - 1; i >= 0; i--) {
+    const z = zzzs[i];
+    z.age += dt;
+    const k = z.age / 1.8;
+    if (k >= 1) { scene.remove(z.mesh); zzzs.splice(i, 1); continue; }
+    z.mesh.position.y += dt * 0.25;
+    z.mesh.position.x += dt * z.drift;
+    z.mesh.scale.setScalar(Math.sin(k * Math.PI) * 1.4);
+    z.mesh.quaternion.copy(camera.quaternion);
+  }
+}
+
+function updateDog(dt, t) {
   const d = dog;
-  d.cell = u;
-  d.state = 'moving';
-  const from = d.group.position.clone(), to = doorstep(u), hop = { t: 0 };
-  d.group.rotation.y = Math.atan2(to.x - from.x, to.z - from.z);
-  d.tween = gsap.to(hop, {
-    t: 1, duration: 0.5, ease: 'none',
-    onUpdate: () => { d.group.position.lerpVectors(from, to, hop.t).y += Math.sin(hop.t * Math.PI) * 0.3; },
-    onComplete: () => {
-      d.state = 'idle';
-      d.group.rotation.y = Math.atan2(px[u] - to.x, pz[u] - to.z);
-    },
+  if (d.state === 'drowning') {
+    // Paddling.
+    d.legs.forEach((leg, i) => { leg.rotation.x = Math.sin(t * 20 + i * 1.6) * 0.8; });
+    d.tail.rotation.y = Math.sin(t * 30) * 0.7;
+    return;
+  }
+  if (d.state === 'indoors') return;
+
+  if (d.state === 'walk') {
+    const p = d.group.position, w = d.next;
+    const dx = w.x - p.x, dz = w.z - p.z, dist = Math.hypot(dx, dz);
+    if (dist > 1e-3) {
+      d.group.rotation.y = lerpAngle(d.group.rotation.y, Math.atan2(dx, dz), 1 - Math.exp(-dt * 8));
+      const step = Math.min(dist, DOG_SPEED * dt);
+      p.x += (dx / dist) * step;
+      p.z += (dz / dist) * step;
+    }
+    d.walkPhase += dt * 14;
+    // Track which cell it's standing on (the current one or a neighbour).
+    let best = d.cell, bestD = (px[d.cell] - p.x) ** 2 + (pz[d.cell] - p.z) ** 2;
+    for (const u of grid.nbrs[d.cell]) {
+      const du = (px[u] - p.x) ** 2 + (pz[u] - p.z) ** 2;
+      if (du < bestD) { best = u; bestD = du; }
+    }
+    d.cell = best;
+    if (dist < 0.02) {
+      d.next = d.path.shift() || null;
+      if (!d.next) { d.state = 'stand'; d.until = t + 1 + Math.random() * 2; }
+    }
+  } else if (t > d.until) {
+    chooseDogActivity(d, t);
+  }
+
+  // Ease into the pose for the current activity.
+  const target = DOG_POSES[d.state === 'sit' ? 'sit' : d.state === 'sleep' ? 'sleep' : 'stand'];
+  const k = 1 - Math.exp(-dt * 5);
+  for (const key in target) d.pose[key] += (target[key] - d.pose[key]) * k;
+  const walking = d.state === 'walk';
+  d.torso.rotation.x = d.pose.torso;
+  d.torso.position.y = 0.08 * d.pose.legs;
+  d.legs.forEach((leg, i) => {
+    leg.position.y = 0.08 * d.pose.legs;
+    leg.scale.y = d.pose.legs;
+    leg.rotation.x = walking ? Math.sin(d.walkPhase + (i === 0 || i === 3 ? 0 : Math.PI)) * 0.6 : leg.rotation.x * (1 - k);
   });
+  d.head.rotation.x = d.pose.head;
+  d.head.rotation.y = d.state === 'stand' || d.state === 'sit'
+    ? Math.sin(t * 0.7) * 0.5 // looking around
+    : d.head.rotation.y * (1 - k);
+  d.eyes.forEach(e => { e.scale.y = d.pose.eyes; });
+  d.body.scale.y = 1 + Math.sin(t * (d.state === 'sleep' ? 2 : 5)) * 0.03;
+  const wag = { walk: [16, 0.6], stand: [10, 0.5], sit: [12, 0.7], sleep: [0, 0] }[d.state];
+  d.tail.rotation.y = Math.sin(t * wag[0]) * wag[1];
+
+  if (d.state === 'sleep' && t > d.zzzAt) {
+    d.zzzAt = t + 1.4;
+    spawnZ(d.head.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.15, 0)));
+  }
 }
 
 const splashGeo = new THREE.RingGeometry(0.1, 0.16, 28);
@@ -1168,52 +1308,29 @@ function splash(at, size) {
   gsap.to(mat, { opacity: 0, duration: 1.3, ease: 'power1.in', onComplete: () => { scene.remove(ring); mat.dispose(); } });
 }
 
-// The home is gone: the dog panics, leaps over the wall into the sea and sinks.
+// The ground under the dog is gone: it drops into the water where it stood,
+// paddles for a moment and sinks.
 function drownDog() {
   const d = dog;
-  const origin = home ? home.v : d.cell;
-  home = null;
   d.state = 'drowning';
   d.group.visible = true;
   d.tween?.kill();
+  d.path = [];
+  d.next = null;
+  Object.assign(d.pose, DOG_POSES.stand);
+  d.torso.rotation.x = 0;
+  d.torso.position.y = 0.08;
+  d.legs.forEach(leg => { leg.scale.y = 1; leg.position.y = 0.08; });
+  d.eyes.forEach(e => { e.scale.y = 1; });
 
-  const start = d.group.position.clone();
-  const target = new THREE.Vector3(start.x, 0, start.z);
-  if (filled(nearestVertex(start.x, start.z), 0)) {
-    const dir = new THREE.Vector3(start.x - px[origin], 0, start.z - pz[origin]);
-    if (dir.lengthSq() < 1e-4) dir.set(px[d.cell] - px[origin], 0, pz[d.cell] - pz[origin]);
-    if (dir.lengthSq() < 1e-4) dir.set(1, 0, 0);
-    dir.normalize();
-    for (let s = 0.5; s < 20; s += 0.25) {
-      const x = start.x + dir.x * s, z = start.z + dir.z * s;
-      if (!filled(nearestVertex(x, z), 0) && !filled(nearestVertex(x + dir.x * 0.5, z + dir.z * 0.5), 0)) {
-        target.set(x + dir.x * 0.4, 0, z + dir.z * 0.4);
-        break;
-      }
-    }
-  }
-
-  d.group.rotation.y = Math.atan2(target.x - start.x, target.z - start.z);
-  const jump = { t: 0 };
+  const at = d.group.position.clone().setY(0);
   d.tween = gsap.timeline()
-    .to(d.group.position, { y: start.y + 0.2, duration: 0.12, yoyo: true, repeat: 3, ease: 'sine.out' })
-    .to(jump, {
-      t: 1, duration: 0.8, ease: 'none',
-      onUpdate: () => {
-        const k = jump.t;
-        d.group.position.set(
-          start.x + (target.x - start.x) * k,
-          start.y + (target.y - start.y) * k + Math.sin(k * Math.PI) * 0.9,
-          start.z + (target.z - start.z) * k,
-        );
-        d.group.rotation.x = k * 0.6;
-      },
-    })
-    .add(() => splash(target, 1))
+    .to(d.group.position, { y: 0, duration: 0.35, ease: 'power2.in' })
+    .add(() => splash(at, 1))
     .to(d.group.position, { y: -0.12, duration: 0.35, ease: 'sine.inOut', yoyo: true, repeat: 5 })
-    .to(d.group.rotation, { x: 0, z: 0.5, duration: 1.2 }, '<')
+    .to(d.group.rotation, { z: 0.5, duration: 1.2 }, '<')
     .to(d.group.position, { y: -0.9, duration: 1.8, ease: 'power1.in' })
-    .add(() => splash(target, 0.5))
+    .add(() => splash(at, 0.5))
     .add(() => {
       scene.remove(d.group);
       if (dog === d) dog = null;
@@ -1324,18 +1441,39 @@ function spawnCreatures() {
 }
 
 // React to an edit: birds leave roofs that were destroyed or built on, and the
-// dog drowns if its home (or the yard under it) is gone.
+// dog drowns only if the ground block it is standing on is removed.
 function syncCreatures() {
   for (const b of birds) if (b.perch && !roofed(b.perch.v, b.perch.L)) birdLeave(b);
+  if (home && !filled(home.v, home.L)) home = null;
   if (!dog || dog.state === 'drowning') return;
-  if (!home || !filled(home.v, home.L) || !filled(dog.cell, 0)) {
+  const t = creatureTime;
+  if (!filled(dog.cell, 0)) {
     drownDog();
   } else if (filled(dog.cell, 1)) {
-    const alt = grid.nbrs[home.v].find(u => filled(u, 0) && !filled(u, 1));
-    dog.group.visible = alt !== undefined; // nowhere to go: it stays indoors
-    if (alt !== undefined) moveDog(alt);
-  } else {
+    // Built over the dog: it trots out to open ground next door, or waits inside.
+    const exit = grid.nbrs[dog.cell].find(walkable);
+    dog.path = [];
+    if (exit !== undefined) {
+      dog.group.visible = true;
+      dog.next = spot(exit, 0.15);
+      dog.state = 'walk';
+    } else {
+      dog.group.visible = false;
+      dog.next = null;
+      dog.state = 'indoors';
+    }
+  } else if (dog.state === 'indoors') {
     dog.group.visible = true;
+    dog.state = 'stand';
+    dog.until = t + 1;
+  } else if (dog.next && !walkable(dog.next.cell)) {
+    // The way ahead was built on or removed: stop and think again.
+    dog.path = [];
+    dog.next = null;
+    dog.state = 'stand';
+    dog.until = t + 1;
+  } else if (dog.path.some(w => !walkable(w.cell))) {
+    dog.path = [];
   }
 }
 
@@ -1397,13 +1535,8 @@ function updateCreatures(dt) {
     if (active < birdTarget() && spots.length) birdArrive(...spots[Math.floor(Math.random() * spots.length)]);
   }
 
-  if (dog) {
-    dog.tail.rotation.y = Math.sin(t * (dog.state === 'drowning' ? 30 : 14)) * 0.7;
-    if (dog.state === 'idle') {
-      dog.head.rotation.z = Math.sin(t * 1.3) * 0.12;
-      dog.body.scale.y = 1 + Math.sin(t * 5) * 0.03;
-    }
-  }
+  if (dog) updateDog(dt, t);
+  updateZzz(dt);
 }
 
 // ---- Optional starter town: open with #demo ----
