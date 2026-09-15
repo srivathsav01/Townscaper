@@ -2,38 +2,67 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Townscaper</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { overflow: hidden; background: #000; }
+      html, body { height: 100%; }
+      body {
+        overflow: hidden;
+        background: #dfeae6;
+        font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+        user-select: none;
+      }
       canvas { display: block; }
 
       #palette {
         position: fixed;
-        bottom: 30px;
+        bottom: 22px;
         left: 50%;
         transform: translateX(-50%);
         display: flex;
-        gap: 10px;
-        background: rgba(0,0,0,0.3);
-        padding: 10px 16px;
-        border-radius: 50px;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 6px;
+        max-width: calc(100vw - 32px);
+        padding: 8px 10px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.35);
+        backdrop-filter: blur(8px);
+        box-shadow: 0 6px 24px rgba(30, 60, 80, 0.15);
       }
 
       .swatch {
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
+        width: 30px;
+        height: 30px;
+        border: 2px solid rgba(255, 255, 255, 0.6);
+        border-radius: 8px;
         cursor: pointer;
-        border: 3px solid transparent;
-        transition: transform 0.15s, border-color 0.15s;
+        box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.12);
+        transition: transform 0.15s ease, border-color 0.15s ease;
       }
+      .swatch:hover { transform: translateY(-3px); }
+      .swatch.active { border-color: #fff; transform: translateY(-7px) scale(1.08); }
 
-      .swatch:hover { transform: scale(1.15); }
-      .swatch.active { border-color: white; transform: scale(1.2); }
+      #hint {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        padding: 8px 16px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.45);
+        color: rgba(35, 60, 75, 0.8);
+        font-size: 13px;
+        white-space: nowrap;
+        pointer-events: none;
+        transition: opacity 1s ease;
+      }
+      #hint.hidden { opacity: 0; }
     </style>
   </head>
   <body>
+    <div id="hint">Click the sea to build · Right click to remove · Drag to look around</div>
     <div id="palette"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
